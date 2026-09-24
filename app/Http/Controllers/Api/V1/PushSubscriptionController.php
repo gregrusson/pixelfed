@@ -41,14 +41,9 @@ class PushSubscriptionController extends Controller
                     'content_encoding' => ContentEncoding::aes128gcm,
                 ]
             );
-        } catch (UniqueConstraintViolationException $exception) {
+        } catch (UniqueConstraintViolationException) {
             // A concurrent registration may have claimed the globally unique endpoint.
-            $existing = $model::findByEndpoint($endpoint);
-            if ($existing && ! $user->ownsPushSubscription($existing)) {
-                abort(409, 'Push endpoint is already registered.');
-            }
-
-            throw $exception;
+            abort(409, 'Push endpoint is already registered.');
         }
 
         return response()->json([

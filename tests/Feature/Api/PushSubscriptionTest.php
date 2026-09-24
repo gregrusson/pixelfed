@@ -5,8 +5,25 @@ use Illuminate\Foundation\Testing\LazilyRefreshDatabase;
 use Laravel\Passport\Passport;
 use Minishlink\WebPush\ContentEncoding;
 use Minishlink\WebPush\VAPID;
+use NotificationChannels\WebPush\PushSubscription;
 
 uses(LazilyRefreshDatabase::class);
+
+class RacingPushSubscription extends PushSubscription
+{
+    public static bool $missFirstLookup = false;
+
+    public static function findByEndpoint(string $endpoint): ?static
+    {
+        if (static::$missFirstLookup) {
+            static::$missFirstLookup = false;
+
+            return null;
+        }
+
+        return parent::findByEndpoint($endpoint);
+    }
+}
 
 beforeEach(function () {
     $keys = VAPID::createVapidKeys();
@@ -101,6 +118,26 @@ it('does not allow one user to take over another user endpoint', function () {
         ->and($other->pushSubscriptions()->count())->toBe(0);
 });
 
+it('returns a conflict if another user claims the endpoint after the initial lookup', function () {
+    $owner = User::factory()->create();
+    $other = User::factory()->create();
+    $owner->pushSubscriptions()->create([
+        'endpoint' => 'https://push.example.com/subscription',
+        'public_key' => 'owner-key',
+        'auth_token' => 'owner-secret',
+        'content_encoding' => ContentEncoding::aes128gcm,
+    ]);
+
+    config(['webpush.model' => RacingPushSubscription::class]);
+    RacingPushSubscription::$missFirstLookup = true;
+    Passport::actingAs($other, ['push']);
+
+    $this->postJson('/api/v1/push/subscription', pushSubscriptionPayload())->assertStatus(409);
+
+    expect($owner->pushSubscriptions()->sole()->auth_token)->toBe('owner-secret')
+        ->and($other->pushSubscriptions()->count())->toBe(0);
+});
+
 it('deletes only the authenticated user subscription', function () {
     $owner = User::factory()->create();
     $other = User::factory()->create();
@@ -121,6 +158,7 @@ it('deletes only the authenticated user subscription', function () {
 it('rejects registration without valid VAPID configuration', function () {
     $user = User::factory()->create();
     Passport::actingAs($user, ['push']);
+    $privateKey = config('webpush.vapid.private_key');
     config(['webpush.vapid.private_key' => null]);
 
     $this->postJson('/api/v1/push/subscription', pushSubscriptionPayload())->assertStatus(503);
@@ -130,9 +168,23 @@ it('rejects registration without valid VAPID configuration', function () {
     $this->postJson('/api/v1/push/subscription', pushSubscriptionPayload())->assertStatus(503);
     expect($user->pushSubscriptions()->count())->toBe(0);
 
-    config(['webpush.vapid.subject' => 'invalid-subject']);
+    config([
+        'webpush.vapid.private_key' => $privateKey,
+        'webpush.vapid.subject' => 'invalid-subject',
+    ]);
     $this->postJson('/api/v1/push/subscription', pushSubscriptionPayload())->assertStatus(503);
     expect($user->pushSubscriptions()->count())->toBe(0);
+});
+
+it('allows a first-party session to register a subscription', function () {
+    $user = User::factory()->create();
+
+    $this->actingAs($user, 'web')
+        ->withHeader('Origin', config('app.url'))
+        ->postJson('/api/v1/push/subscription', pushSubscriptionPayload())
+        ->assertOk();
+
+    expect($user->pushSubscriptions()->count())->toBe(1);
 });
 
 it('requires the push OAuth scope for registration and deletion', function () {
