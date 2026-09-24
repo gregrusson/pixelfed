@@ -20,9 +20,9 @@
             <li class="nav-item pl-3 {{request()->is('settings/filters*')?'active':''}}">
                 <a class="nav-link font-weight-light text-muted" href="{{route('settings.filters')}}">{{__('settings.filters')}}</a>
             </li>
-            {{-- <li class="nav-item pl-3 {{request()->is('settings/notifications')?'active':''}}">
+            <li class="nav-item pl-3 {{request()->is('settings/notifications')?'active':''}}">
                 <a class="nav-link font-weight-light text-muted" href="{{route('settings.notifications')}}">{{__('settings.notifications')}}</a>
-            </li> --}}
+            </li>
             <li class="nav-item pl-3 {{request()->is('settings/password')?'active':''}}">
                 <a class="nav-link font-weight-light text-muted" href="{{route('settings.password')}}">{{__('settings.password')}}</a>
             </li>
