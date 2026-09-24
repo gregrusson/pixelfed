@@ -47,7 +47,7 @@ class PushSubscriptionController extends Controller
         }
 
         return response()->json([
-            'id' => $subscription->id,
+            'id' => (string) $subscription->id,
             'endpoint' => $subscription->endpoint,
             'server_key' => $vapid['public_key'],
         ]);
@@ -81,7 +81,7 @@ class PushSubscriptionController extends Controller
         $subject = $vapid['subject'];
         $validSubject = str_starts_with($subject, 'mailto:')
             ? filter_var(substr($subject, 7), FILTER_VALIDATE_EMAIL)
-            : (filter_var($subject, FILTER_VALIDATE_URL) && in_array(parse_url($subject, PHP_URL_SCHEME), ['http', 'https'], true));
+            : (filter_var($subject, FILTER_VALIDATE_URL) && parse_url($subject, PHP_URL_SCHEME) === 'https');
         if (! $validSubject) {
             return false;
         }
@@ -92,7 +92,7 @@ class PushSubscriptionController extends Controller
                 'publicKey' => $vapid['public_key'],
                 'privateKey' => $vapid['private_key'],
             ]);
-        } catch (\ErrorException $exception) {
+        } catch (\Throwable) {
             return false;
         }
 

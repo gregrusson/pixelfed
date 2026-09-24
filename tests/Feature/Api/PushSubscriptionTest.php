@@ -72,14 +72,15 @@ it('creates a subscription with aes128gcm without changing notification preferen
     $user = User::factory()->create(['notify_enabled' => false]);
     Passport::actingAs($user, ['push']);
 
-    $this->postJson('/api/v1/push/subscription', pushSubscriptionPayload())
+    $response = $this->postJson('/api/v1/push/subscription', pushSubscriptionPayload())
         ->assertOk()
         ->assertJsonPath('endpoint', 'https://push.example.com/subscription')
         ->assertJsonPath('server_key', config('webpush.vapid.public_key'))
         ->assertJsonStructure(['id', 'endpoint', 'server_key']);
 
     $subscription = $user->pushSubscriptions()->sole();
-    expect($subscription->public_key)->toBe('browser-public-key')
+    expect($response->json('id'))->toBe((string) $subscription->id)
+        ->and($subscription->public_key)->toBe('browser-public-key')
         ->and($subscription->auth_token)->toBe('browser-auth-secret')
         ->and($subscription->content_encoding)->toBe(ContentEncoding::aes128gcm)
         ->and((bool) $user->fresh()->notify_enabled)->toBeFalse();
@@ -168,12 +169,29 @@ it('rejects registration without valid VAPID configuration', function () {
     $this->postJson('/api/v1/push/subscription', pushSubscriptionPayload())->assertStatus(503);
     expect($user->pushSubscriptions()->count())->toBe(0);
 
+    config(['webpush.vapid.private_key' => '%']);
+    $this->postJson('/api/v1/push/subscription', pushSubscriptionPayload())->assertStatus(503);
+    expect($user->pushSubscriptions()->count())->toBe(0);
+
     config([
         'webpush.vapid.private_key' => $privateKey,
         'webpush.vapid.subject' => 'invalid-subject',
     ]);
     $this->postJson('/api/v1/push/subscription', pushSubscriptionPayload())->assertStatus(503);
     expect($user->pushSubscriptions()->count())->toBe(0);
+});
+
+it('accepts an HTTPS VAPID subject and rejects HTTP', function () {
+    $user = User::factory()->create();
+    Passport::actingAs($user, ['push']);
+    config(['webpush.vapid.subject' => 'https://example.com/contact']);
+
+    $this->postJson('/api/v1/push/subscription', pushSubscriptionPayload())->assertOk();
+
+    config(['webpush.vapid.subject' => 'http://example.com/contact']);
+    $this->postJson('/api/v1/push/subscription', pushSubscriptionPayload('https://push.example.com/another'))
+        ->assertStatus(503);
+    expect($user->pushSubscriptions()->count())->toBe(1);
 });
 
 it('allows a first-party session to register a subscription', function () {
