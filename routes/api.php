@@ -7,6 +7,7 @@ use App\Http\Controllers\Api\ApiV1Dot1Controller;
 use App\Http\Controllers\Api\ApiV2Controller;
 use App\Http\Controllers\Api\V1\Admin\DomainBlocksController;
 use App\Http\Controllers\Api\V1\DomainBlockController;
+use App\Http\Controllers\Api\V1\PushSubscriptionController;
 use App\Http\Controllers\Api\V1\TagsController;
 use App\Http\Controllers\ApiController;
 use App\Http\Controllers\AppRegisterController;
@@ -179,6 +180,8 @@ Route::prefix('api')->group(function () use ($middleware) {
         Route::put('media/{id}', [ApiV1Controller::class, 'mediaUpdate'])->middleware($middleware);
         Route::get('mutes', [ApiV1Controller::class, 'accountMutes'])->middleware($middleware);
         Route::get('notifications', [ApiV1Controller::class, 'accountNotifications'])->middleware($middleware);
+        Route::post('push/subscription', [PushSubscriptionController::class, 'store'])->middleware($middleware);
+        Route::delete('push/subscription', [PushSubscriptionController::class, 'destroy'])->middleware($middleware);
         Route::get('suggestions', [ApiV1Controller::class, 'accountSuggestions'])->middleware($middleware);
 
         Route::post('statuses/{id}/favourite', [ApiV1Controller::class, 'statusFavouriteById'])->middleware($middleware);
