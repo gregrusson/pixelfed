@@ -1,6 +1,6 @@
 {
-  "name": "Russon Family",
-  "short_name": "Russon",
+  "name": "Pixelfed",
+  "short_name": "Pixelfed",
   "start_url": "/?source=pwa",
   "display": "standalone",
   "background_color": "#f5f8fa",
