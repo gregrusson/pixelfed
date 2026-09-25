@@ -60,6 +60,20 @@ use Laravel\Passport\Http\Controllers\TransientTokenController;
 use Spatie\Honeypot\ProtectAgainstSpam;
 
 Route::domain(config('pixelfed.domain.app'))->middleware(['localization'])->group(function () {
+    Route::get('/manifest.json', function () {
+        $manifest = json_decode(
+            file_get_contents(public_path('manifest.static.json')),
+            true
+        );
+
+        $manifest['name'] = config('app.pwa_name');
+        $manifest['short_name'] = config('app.pwa_short_name');
+
+        return response()->json($manifest, 200, [
+            'Content-Type' => 'application/manifest+json',
+        ]);
+    });
+
     Route::get('/', [SiteController::class, 'home'])->name('timeline.personal');
     Route::redirect('/home', '/')->name('home');
     Route::get('web/directory', [LandingController::class, 'directoryRedirect']);
@@ -544,18 +558,4 @@ Route::domain(config('pixelfed.domain.app'))->middleware(['localization'])->grou
     Route::get('@{username}@{domain}', [SiteController::class, 'legacyWebfingerRedirect']);
     Route::get('@{username}', [SiteController::class, 'legacyProfileRedirect']);
     Route::get('{username}', [ProfileController::class, 'show']);
-
-    Route::get('/manifest.json', function () {
-        $manifest = json_decode(
-            file_get_contents(public_path('manifest.static.json')),
-            true
-        );
-
-        $manifest['name'] = config('app.pwa_name');
-        $manifest['short_name'] = config('app.pwa_short_name');
-
-        return response()->json($manifest, 200, [
-            'Content-Type' => 'application/manifest+json',
-        ]);
-    });
 });
