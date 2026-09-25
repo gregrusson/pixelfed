@@ -18,6 +18,8 @@ return [
     */
 
     'name' => env('APP_NAME', 'Pixelfed'),
+    'pwa_name' => env('PWA_NAME', env('APP_NAME', 'Pixelfed')),
+    'pwa_short_name' => env('PWA_SHORT_NAME', env('APP_NAME', 'Pixelfed')),
 
     /*
     |--------------------------------------------------------------------------
