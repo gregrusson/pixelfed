@@ -2,6 +2,25 @@ const OFFLINE_VERSION = 1;
 const CACHE_NAME = "offline";
 const OFFLINE_URL = "/offline.html";
 
+self.addEventListener("push", (event) => {
+	let payload = {};
+	try {
+		const value = event.data?.json();
+		if (value && typeof value === "object" && !Array.isArray(value)) {
+			payload = value;
+		}
+	} catch {
+		// Missing or malformed data still produces a generic notification.
+	}
+	event.waitUntil(self.registration.showNotification(
+		typeof payload.title === "string" ? payload.title : "Pixelfed",
+		{
+			body: typeof payload.body === "string" ? payload.body : "You have a new notification",
+			data: { notification_type: "test", url: "/" },
+		}
+	));
+});
+
 self.addEventListener("install", (event) => {
 	event.waitUntil(
 		(async () => {
