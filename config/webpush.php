@@ -37,6 +37,18 @@ return [
      */
     'client_options' => [],
 
+    // Security-critical transport options are constructed directly, not client_options.
+    'delivery' => [
+        'connection' => 'redis',
+        'queue' => 'pushnotify',
+        'dns_timeout' => 2,
+        'connect_timeout' => 3,
+        'request_timeout' => 10,
+        'ttl' => 300,
+        // Also deny locally routed public space and deployment-specific NAT64 prefixes.
+        'blocked_cidrs' => [],
+    ],
+
     /**
      * Google Cloud Messaging.
      *
