@@ -112,7 +112,9 @@ class WebPushNotificationService
                 'status_id' => (string) $comment->id,
                 'parent_status_id' => (string) $parent->id,
             ];
-            if ($parent->scope === 'public' && $comment->scope === 'public'
+            // Direct messages use conversation views, not the normal post route.
+            $linkableScopes = ['public', 'unlisted', 'private'];
+            if (in_array($parent->scope, $linkableScopes, true) && in_array($comment->scope, $linkableScopes, true)
                 && ! $parent->uri && preg_match('/\A[A-Za-z0-9_]+\z/D', $recipient->username ?? '')) {
                 $payload['url'] = '/p/'.$recipient->username.'/'.$parent->id;
             }

@@ -4,6 +4,7 @@ use App\Jobs\PushNotificationPipeline\DeliverWebPush;
 use App\Models\Notification;
 use App\Models\Profile;
 use App\Models\User;
+use App\Services\StatusService;
 use App\Services\WebPush\BoundedDnsResolver;
 use App\Services\WebPush\DeliveryService;
 use App\Services\WebPushNotificationService;
@@ -139,11 +140,140 @@ it('does not classify general mentions or group events as comments', function (a
     ['attributes' => ['action' => 'like']],
 ]);
 
-it('omits URLs for non-public contexts', function (string $scope) {
-    DB::table('statuses')->where('id', 100)->update(['scope' => $scope]);
+it('links local parent posts across supported reply visibilities without exposing content', function (string $parentScope, string $commentScope) {
+    DB::table('statuses')->where('id', 100)->update(['scope' => $parentScope]);
+    DB::table('statuses')->where('id', 200)->update(['scope' => $commentScope]);
+    createCommentPushNotification();
+    Queue::assertPushed(DeliverWebPush::class, function ($job) {
+        expect($job->payload)->toBe([
+            'notification_type' => 'comment', 'title' => 'New Comment',
+            'body' => '@bob commented on your post', 'account_id' => '20',
+            'status_id' => '200', 'parent_status_id' => '100', 'url' => '/p/alice/100',
+        ])->and($job->userId)->toBe('1');
+        expect(serialize($job))->not->toContain('parent text', 'private comment text', 'private-reply', 'remote.example');
+
+        return true;
+    });
+    Queue::assertPushed(DeliverWebPush::class, 1);
+})->with([
+    'public/public' => ['public', 'public'],
+    'unlisted/unlisted' => ['unlisted', 'unlisted'],
+    'private/private' => ['private', 'private'],
+    'public/unlisted' => ['public', 'unlisted'],
+    'public/private' => ['public', 'private'],
+    'unlisted/private' => ['unlisted', 'private'],
+]);
+
+it('links mixed federated replies whose visibility is derived independently of the local parent', function (string $parentScope, string $commentScope) {
+    // Helpers::getScope/createOrUpdateStatus retain the remote object's scope;
+    // unlike local creation, importing a reply does not clamp it to the parent.
+    DB::table('profiles')->where('id', 20)->update(['user_id' => null, 'domain' => 'remote.example', 'username' => '@bob@remote.example']);
+    DB::table('statuses')->where('id', 100)->update(['scope' => $parentScope]);
+    DB::table('statuses')->where('id', 200)->update(['scope' => $commentScope, 'uri' => 'https://remote.example/private-reply']);
+    createCommentPushNotification();
+    Queue::assertPushed(DeliverWebPush::class, function ($job) {
+        expect($job->userId)->toBe('1')->and($job->payload['url'])->toBe('/p/alice/100')
+            ->and($job->payload['body'])->toBe('@bob@remote.example commented on your post');
+        expect(serialize($job))->not->toContain('https://remote.example', 'private-reply', 'parent text', 'private comment text');
+
+        return true;
+    });
+    Queue::assertPushed(DeliverWebPush::class, 1);
+})->with([
+    'unlisted/public' => ['unlisted', 'public'],
+    'private/public' => ['private', 'public'],
+    'private/unlisted' => ['private', 'unlisted'],
+]);
+
+it('links replies after normal creation clamps a more visible request to its parent', function (string $parentScope, string $requestedScope) {
+    // Local creation cannot persist these three pairs as requested: replies must
+    // be at most as visible as the parent. Exercise the real normalization.
+    $commentScope = StatusService::clampReplyVisibility($requestedScope, $parentScope);
+    expect($commentScope)->toBe($parentScope);
+    DB::table('statuses')->where('id', 100)->update(['scope' => $parentScope]);
+    DB::table('statuses')->where('id', 200)->update(['scope' => $commentScope]);
+    createCommentPushNotification();
+    Queue::assertPushed(DeliverWebPush::class, fn ($job) => $job->payload['url'] === '/p/alice/100');
+    Queue::assertPushed(DeliverWebPush::class, 1);
+})->with([
+    'unlisted/public request' => ['unlisted', 'public'],
+    'private/public request' => ['private', 'public'],
+    'private/unlisted request' => ['private', 'unlisted'],
+]);
+
+it('links private nested replies to the immediate parent owner rather than the root post', function () {
+    DB::table('statuses')->whereIn('id', [100, 200])->update(['scope' => 'private']);
+    DB::table('statuses')->insert(['id' => 300, 'profile_id' => 30, 'in_reply_to_id' => 200, 'in_reply_to_profile_id' => 20, 'scope' => 'private']);
+    User::find(2)->pushSubscriptions()->create(['endpoint' => 'https://push.example.com/bob']);
+    createCommentPushNotification(['profile_id' => 20, 'actor_id' => 30, 'item_id' => 300]);
+    Queue::assertPushed(DeliverWebPush::class, fn ($job) => $job->userId === '2'
+        && $job->payload['url'] === '/p/bob/200' && $job->payload['parent_status_id'] === '200');
+    Queue::assertPushed(DeliverWebPush::class, 1);
+});
+
+it('omits URLs when either scope needs a different route or is unsupported', function (string $parentScope, string $commentScope) {
+    DB::table('statuses')->where('id', 100)->update(['scope' => $parentScope]);
+    DB::table('statuses')->where('id', 200)->update(['scope' => $commentScope]);
     createCommentPushNotification();
     Queue::assertPushed(DeliverWebPush::class, fn ($job) => ! array_key_exists('url', $job->payload));
-})->with(['private', 'direct', 'unlisted']);
+    Queue::assertPushed(DeliverWebPush::class, 1);
+})->with([
+    'direct conversation' => ['direct', 'direct'],
+    'direct parent' => ['direct', 'public'],
+    'direct reply' => ['public', 'direct'],
+    'unsupported parent' => ['draft', 'public'],
+    'unsupported reply' => ['public', 'draft'],
+]);
+
+it('omits remote parent URLs and their URI at every linkable visibility', function (string $scope) {
+    DB::table('statuses')->where('id', 100)->update(['scope' => $scope, 'uri' => 'https://remote.example/private-parent']);
+    DB::table('statuses')->where('id', 200)->update(['scope' => $scope]);
+    createCommentPushNotification();
+    Queue::assertPushed(DeliverWebPush::class, function ($job) {
+        expect($job->payload)->not->toHaveKey('url');
+        expect(serialize($job))->not->toContain('remote.example', 'private-parent', 'parent text', 'private comment text');
+
+        return true;
+    });
+    Queue::assertPushed(DeliverWebPush::class, 1);
+})->with(['public', 'unlisted', 'private']);
+
+it('omits unsafe recipient usernames from the URL at every linkable visibility', function (string $scope, string $username) {
+    DB::table('statuses')->whereIn('id', [100, 200])->update(['scope' => $scope]);
+    DB::table('profiles')->where('id', 10)->update(['username' => $username]);
+    createCommentPushNotification();
+    Queue::assertPushed(DeliverWebPush::class, fn ($job) => ! array_key_exists('url', $job->payload));
+    Queue::assertPushed(DeliverWebPush::class, 1);
+})->with(['public', 'unlisted', 'private'])->with(['alice/suffix', 'alice\\suffix', 'alice%2f', "alice\n", 'alice.example', 'álîce', '']);
+
+it('preserves recipient eligibility checks for newly linkable private replies', function (string $case) {
+    DB::table('statuses')->whereIn('id', [100, 200])->update(['scope' => 'private']);
+    $attributes = [];
+    switch ($case) {
+        case 'unrelated_recipient':
+            $attributes['profile_id'] = 30;
+            break;
+        case 'self_reply':
+            DB::table('statuses')->where('id', 200)->update(['profile_id' => 10]);
+            $attributes['actor_id'] = 10;
+            break;
+        case 'preference':
+            DB::table('users')->where('id', 1)->update(['notify_comment' => false]);
+            break;
+        case 'group_parent':
+        case 'group_reply':
+            DB::table('statuses')->where('id', $case === 'group_parent' ? 100 : 200)->update(['group_id' => 99]);
+            break;
+        case 'wrong_reply_owner':
+            DB::table('statuses')->where('id', 200)->update(['in_reply_to_profile_id' => 30]);
+            break;
+        default:
+            DB::table('user_filters')->insert(['user_id' => 10, 'filterable_id' => 20, 'filterable_type' => Profile::class, 'filter_type' => $case]);
+    }
+    createCommentPushNotification($attributes);
+    Queue::assertNothingPushed();
+    expect($this->claims)->toBeEmpty();
+})->with(['unrelated_recipient', 'self_reply', 'preference', 'group_parent', 'group_reply', 'wrong_reply_owner', 'mute', 'block']);
 
 it('rejects missing deleted inconsistent remote and filtered recipients safely', function (string $case) {
     match ($case) {
