@@ -63,8 +63,12 @@ class SpaController extends Controller
 
         $account = AccountService::get($id);
 
-        if ($account && isset($account['url']) && $account['local']) {
-            return redirect($account['url']);
+        if ($account && ! empty($account['local'])
+            && is_string($account['username'] ?? null)
+            && preg_match('/\A[A-Za-z0-9_][A-Za-z0-9_.-]*\z/D', $account['username'])) {
+            // Account URLs may contain remote data; this route must never
+            // redirect off-origin, including when the browser session expired.
+            return redirect('/'.$account['username']);
         }
 
         return redirect('/login');
