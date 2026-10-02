@@ -13,6 +13,7 @@ use App\Models\User;
 use App\Models\UserFilter;
 use App\Services\WebPush\DeliveryQueueConfiguration;
 use App\Services\WebPush\DeliveryService;
+use App\Services\WebPush\EventSupport;
 use Illuminate\Cache\RedisStore;
 use Illuminate\Contracts\Bus\Dispatcher;
 use Illuminate\Contracts\Queue\Factory as QueueFactory;
@@ -135,24 +136,8 @@ class WebPushNotificationService
                 ->whereFilterableId($actor->id)->exists()) {
                 return;
             }
-            // Only plain account identifiers enter the body (never display names,
-            // markup or remote URLs). Remote usernames may include their domain.
-            $username = $actor->username;
-            $remote = $actor->domain !== null;
-            if ($remote && is_string($username) && str_starts_with($username, '@')) {
-                // Imported profiles store @name@domain. Remove exactly one marker;
-                // a second leading @ must still fail validation below.
-                $username = substr($username, 1);
-            }
-            // Helpers::extractUsername permits remote names beginning with . or -.
-            // Keep the local rule unchanged and require an alphanumeric remote name
-            // after removing its permitted punctuation, as the importer does.
-            $pattern = $remote
-                ? '/\A[A-Za-z0-9_.-][A-Za-z0-9_.@-]*\z/D'
-                : '/\A[A-Za-z0-9_][A-Za-z0-9_.@-]*\z/D';
-            if (! is_string($username) || strlen($username) > 255
-                || ! preg_match($pattern, $username)
-                || ($remote && ! ctype_alnum(str_replace(['_', '.', '-'], '', explode('@', $username)[0])))) {
+            $username = EventSupport::normalizeActorUsername($actor);
+            if ($username === null) {
                 return;
             }
             app(DeliveryService::class)->validateConfiguration(); // Local checks only.

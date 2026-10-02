@@ -74,6 +74,7 @@ async function push(instance, data) {
 }
 
 const validPaths = [
+    '/account/follow-requests',
     '/i/web/profile/1', '/i/web/profile/123456789',
     '/', targetPath, '/p/Alice_123/999', '/p/alice/123?foo=bar',
     '/p/alice/123#comments', '/settings/notifications',
@@ -82,6 +83,11 @@ const validPaths = [
     '/p/a/1?padding=' + 'a'.repeat(2048 - '/p/a/1?padding='.length),
 ];
 const invalidPaths = [
+    '/account/follow-requests/', '/account/follow-requests?foo=bar',
+    '/account/follow-requests#requests', '/account/follow-requests/1',
+    '/account/follow-requests/../settings', '/account/%66ollow-requests',
+    '//evil.example/account/follow-requests', 'https://evil.example/account/follow-requests',
+    '/account\\follow-requests',
     '/i/web/profile/', '/i/web/profile/abc', '/i/web/profile/123/',
     '/i/web/profile/1/evil', '/i/web/profile/-1', '/i/web/profile/1.0',
     '/i/web/profile/%31', '/i/web/profile/1?next=https://evil.example',
@@ -141,6 +147,30 @@ test('push preserves title/body and only sanitized metadata', async () => {
             body: '@bob commented on your post', data: { notification_type: 'comment', url: targetPath },
         },
     }]);
+});
+
+test('follow-request push-to-click opens the local management page', async () => {
+    const instance = worker();
+    await push(instance, { json: () => ({
+        title: 'Follow Request', body: '@bob requested to follow you',
+        notification_type: 'follow_request', url: '/account/follow-requests', account_id: '20',
+    }) });
+    assert.deepStrictEqual(instance.displays[0].options.data, {
+        notification_type: 'follow_request', url: '/account/follow-requests',
+    });
+    await click(instance, instance.displays[0].options.data);
+    assert.deepStrictEqual(instance.opens, [origin + '/account/follow-requests']);
+});
+
+test('follow-request push-to-click focuses an existing management window', async () => {
+    const existing = windowClient(origin + '/account/follow-requests');
+    const instance = worker({ matchAll: async () => [existing.client] });
+    await push(instance, { json: () => ({
+        notification_type: 'follow_request', url: '/account/follow-requests',
+    }) });
+    await click(instance, instance.displays[0].options.data);
+    assert.deepStrictEqual(existing.calls, [['focus']]);
+    assert.deepStrictEqual(instance.opens, []);
 });
 
 test('follow push-to-click uses only the local numeric profile destination', async () => {
