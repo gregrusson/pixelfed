@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Jobs\PushNotificationPipeline\DeliverWebPush;
+use App\Models\Mention;
 use App\Models\Notification;
 use App\Models\Profile;
 use App\Models\Status;
@@ -25,6 +26,7 @@ class WebPushNotificationService
 
     public static function notify(Notification $notification): void
     {
+        $eventType = $notification->action === 'mention' ? 'mention' : 'comment';
         try {
             // Group actions and all other event types are deliberately excluded.
             if (! in_array($notification->action, ['comment', 'mention'], true)
@@ -43,25 +45,43 @@ class WebPushNotificationService
                 || ! in_array($notification->item_type, [Status::class, 'App\\Status'], true)) {
                 return;
             }
-            $comment = Status::find($notification->item_id);
-            $parent = $comment?->in_reply_to_id ? Status::find($comment->in_reply_to_id) : null;
+            $status = Status::find($notification->item_id);
             $actor = Profile::find($notification->actor_id);
-            $recipient = $parent ? Profile::find($parent->profile_id) : null;
-            if (! $comment || ! $parent || ! $actor || ! $recipient
-                || $comment->group_id || $parent->group_id
+            $recipient = Profile::find($notification->profile_id);
+            if (! $status || ! $actor || ! $recipient
+                || $status->group_id
                 || $recipient->domain !== null || ! $recipient->user_id
-                || (string) $comment->profile_id !== (string) $actor->id
-                || (string) $notification->profile_id !== (string) $recipient->id
-                || (string) $comment->in_reply_to_profile_id !== (string) $recipient->id
-                || (string) $actor->id === (string) $recipient->id
-                || (bool) $parent->comments_disabled) {
+                || (string) $status->profile_id !== (string) $actor->id
+                || (string) $actor->id === (string) $recipient->id) {
                 return;
             }
-            // Both actions now represent a reply to its immediate parent's owner.
-            // A mention of anyone else never passes the ownership check above.
+            $parent = $status->in_reply_to_id ? Status::find($status->in_reply_to_id) : null;
+            if ($status->in_reply_to_id && (! $parent || $parent->group_id
+                || (string) $status->in_reply_to_profile_id !== (string) $parent->profile_id)) {
+                return;
+            }
+            // Classify once, before eligibility. An owner mention remains a
+            // comment even when its comment preference or parent rejects it.
+            $eventType = self::classify($notification, $status, $recipient, $parent);
+            if ($eventType === null) {
+                return;
+            }
             $user = User::find($recipient->user_id);
-            if (! $user || (string) $user->profile_id !== (string) $recipient->id
-                || ! (bool) $user->notify_comment || ! $user->pushSubscriptions()->exists()) {
+            if (! $user || (string) $user->profile_id !== (string) $recipient->id) {
+                return;
+            }
+            $enabled = $eventType === 'comment' ? (bool) $user->notify_comment : (bool) $user->notify_mention;
+            if (! $enabled || ! $user->pushSubscriptions()->exists()) {
+                return;
+            }
+            if ($eventType === 'comment') {
+                if ((bool) $parent->comments_disabled) {
+                    return;
+                }
+            } elseif (! in_array($status->scope, ['public', 'unlisted', 'private'], true)
+                || ! StatusService::isVisibleTo($status->profile_id, $status->scope, $recipient->id)) {
+                // Mentioning someone does not itself grant access to a private
+                // status. Direct messages and groups use separate flows.
                 return;
             }
             // Reuse the same profile-based mute/block records as CommentPipeline.
@@ -100,28 +120,17 @@ class WebPushNotificationService
             app(QueueFactory::class)->connection($connection);
             $store = Cache::store('redis')->getStore();
             if (! $store instanceof RedisStore) {
-                self::report('redis_dedupe_required');
+                self::report('redis_dedupe_required', $eventType);
 
                 return;
             }
-            $payload = [
-                'notification_type' => 'comment',
-                'title' => 'New Comment',
-                'body' => '@'.$username.' commented on your post',
-                'account_id' => (string) $actor->id,
-                'status_id' => (string) $comment->id,
-                'parent_status_id' => (string) $parent->id,
-            ];
-            // Direct messages use conversation views, not the normal post route.
-            $linkableScopes = ['public', 'unlisted', 'private'];
-            if (in_array($parent->scope, $linkableScopes, true) && in_array($comment->scope, $linkableScopes, true)
-                && ! $parent->uri && preg_match('/\A[A-Za-z0-9_]+\z/D', $recipient->username ?? '')) {
-                $payload['url'] = '/p/'.$recipient->username.'/'.$parent->id;
-            }
+            $payload = $eventType === 'comment'
+                ? self::commentPayload($status, $parent, $actor, $recipient, $username)
+                : self::mentionPayload($status, $actor, $username);
             $expiresAt = time() + $ttl;
             foreach ($user->pushSubscriptions()->select('id')->lazyById() as $subscription) {
                 $job = (new DeliverWebPush((string) $user->id, (string) $subscription->id, $payload, $expiresAt))->afterCommit();
-                $key = 'webpush:comment:'.$user->id.':'.$comment->id.':'.$subscription->id;
+                $key = 'webpush:'.$eventType.':'.$user->id.':'.$status->id.':'.$subscription->id;
                 $claim = $store->lock($key, self::DEDUPE_SECONDS);
                 if (! $claim->get()) {
                     continue;
@@ -133,18 +142,72 @@ class WebPushNotificationService
                 } catch (Throwable) {
                     // Dispatch can fail before or after acceptance by Redis.
                     // Keep the claim when that outcome cannot be distinguished.
-                    self::report('enqueue_failed');
+                    self::report('enqueue_failed', $eventType);
                 }
             }
         } catch (Throwable) {
-            self::report('orchestration_failed');
+            self::report('orchestration_failed', $eventType ?? 'mention');
         }
     }
 
-    private static function report(string $category): void
+    private static function classify(Notification $notification, Status $status, Profile $recipient, ?Status $parent): ?string
+    {
+        $ownsParent = $parent && (string) $parent->profile_id === (string) $recipient->id;
+        if ($notification->action === 'comment') {
+            return $ownsParent ? 'comment' : null;
+        }
+        if ($ownsParent) {
+            return 'comment';
+        }
+
+        return Mention::whereStatusId($status->id)->whereProfileId($recipient->id)->exists()
+            ? 'mention' : null;
+    }
+
+    private static function commentPayload(Status $status, Status $parent, Profile $actor, Profile $recipient, string $username): array
+    {
+        $payload = [
+            'notification_type' => 'comment',
+            'title' => 'New Comment',
+            'body' => '@'.$username.' commented on your post',
+            'account_id' => (string) $actor->id,
+            'status_id' => (string) $status->id,
+            'parent_status_id' => (string) $parent->id,
+        ];
+        // Direct messages use conversation views, not the normal post route.
+        $linkableScopes = ['public', 'unlisted', 'private'];
+        if (in_array($parent->scope, $linkableScopes, true) && in_array($status->scope, $linkableScopes, true)
+            && ! $parent->uri && preg_match('/\A[A-Za-z0-9_]+\z/D', $recipient->username ?? '')) {
+            $payload['url'] = '/p/'.$recipient->username.'/'.$parent->id;
+        }
+
+        return $payload;
+    }
+
+    private static function mentionPayload(Status $status, Profile $actor, string $username): array
+    {
+        $payload = [
+            'notification_type' => 'mention',
+            'title' => 'New Mention',
+            'body' => '@'.$username.' mentioned you',
+            'account_id' => (string) $actor->id,
+            'status_id' => (string) $status->id,
+        ];
+        // Build only reviewed local destinations. Remote content can still
+        // notify, but its SPA route is outside the worker's allowlist.
+        if ($actor->domain === null && (bool) $status->local && ! $status->uri
+            && preg_match('/\A[A-Za-z0-9_]+\z/D', $actor->username ?? '')
+            && preg_match('/\A[0-9]+\z/D', (string) $status->id)) {
+            $payload['url'] = '/p/'.$actor->username.'/'.$status->id;
+        }
+
+        return $payload;
+    }
+
+    private static function report(string $category, string $eventType = 'comment'): void
     {
         try {
-            Log::warning('Web Push comment: '.$category);
+            Log::warning('Web Push '.$eventType.': '.$category);
         } catch (Throwable) {
             // Even a broken logger must not disrupt internal notifications.
         }
