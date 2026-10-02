@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Jobs\PushNotificationPipeline\DeliverWebPush;
+use App\Models\Follower;
 use App\Models\Mention;
 use App\Models\Notification;
 use App\Models\Profile;
@@ -26,11 +27,10 @@ class WebPushNotificationService
 
     public static function notify(Notification $notification): void
     {
-        $eventType = $notification->action === 'mention' ? 'mention' : 'comment';
+        $eventType = in_array($notification->action, ['mention', 'follow'], true) ? $notification->action : 'comment';
         try {
             // Group actions and all other event types are deliberately excluded.
-            if (! in_array($notification->action, ['comment', 'mention'], true)
-                || ! in_array($notification->item_type, [Status::class, 'App\\Status'], true)) {
+            if (! self::supports($notification)) {
                 return;
             }
             // The observer already runs after commit; also protect direct callers.
@@ -41,36 +41,59 @@ class WebPushNotificationService
             }
             $notification = $notification->fresh();
             if (! $notification || $notification->trashed()
-                || ! in_array($notification->action, ['comment', 'mention'], true)
-                || ! in_array($notification->item_type, [Status::class, 'App\\Status'], true)) {
+                || ! self::supports($notification)) {
                 return;
             }
-            $status = Status::find($notification->item_id);
             $actor = Profile::find($notification->actor_id);
             $recipient = Profile::find($notification->profile_id);
-            if (! $status || ! $actor || ! $recipient
-                || $status->group_id
+            if (! $actor || ! $recipient
                 || $recipient->domain !== null || ! $recipient->user_id
-                || (string) $status->profile_id !== (string) $actor->id
                 || (string) $actor->id === (string) $recipient->id) {
                 return;
             }
-            $parent = $status->in_reply_to_id ? Status::find($status->in_reply_to_id) : null;
-            if ($status->in_reply_to_id && (! $parent || $parent->group_id
-                || (string) $status->in_reply_to_profile_id !== (string) $parent->profile_id)) {
-                return;
-            }
-            // Classify once, before eligibility. An owner mention remains a
-            // comment even when its comment preference or parent rejects it.
-            $eventType = self::classify($notification, $status, $recipient, $parent);
-            if ($eventType === null) {
-                return;
+            if ($notification->action === 'follow') {
+                if ((string) $notification->item_id !== (string) $recipient->id
+                    || ! preg_match('/\A[0-9]+\z/D', (string) $actor->id)) {
+                    return;
+                }
+                $follower = Follower::whereProfileId($actor->id)->whereFollowingId($recipient->id)->first();
+                // Notifications do not bind a follower generation. Reject older
+                // notifications, but second-precision timestamps cannot distinguish
+                // a stale replay from a re-follow within the same second.
+                if (! $follower || ! $notification->created_at || ! $follower->created_at
+                    || $notification->created_at->lt($follower->created_at)) {
+                    return;
+                }
+                $eventType = 'follow';
+                $generationId = $follower->id;
+            } else {
+                $status = Status::find($notification->item_id);
+                if (! $status || $status->group_id
+                    || (string) $status->profile_id !== (string) $actor->id) {
+                    return;
+                }
+                $parent = $status->in_reply_to_id ? Status::find($status->in_reply_to_id) : null;
+                if ($status->in_reply_to_id && (! $parent || $parent->group_id
+                    || (string) $status->in_reply_to_profile_id !== (string) $parent->profile_id)) {
+                    return;
+                }
+                // Classify once, before eligibility. An owner mention remains a
+                // comment even when its comment preference or parent rejects it.
+                $eventType = self::classify($notification, $status, $recipient, $parent);
+                if ($eventType === null) {
+                    return;
+                }
+                $generationId = $status->id;
             }
             $user = User::find($recipient->user_id);
             if (! $user || (string) $user->profile_id !== (string) $recipient->id) {
                 return;
             }
-            $enabled = $eventType === 'comment' ? (bool) $user->notify_comment : (bool) $user->notify_mention;
+            $enabled = match ($eventType) {
+                'comment' => (bool) $user->notify_comment,
+                'mention' => (bool) $user->notify_mention,
+                'follow' => (bool) $user->notify_follow,
+            };
             if (! $enabled || ! $user->pushSubscriptions()->exists()) {
                 return;
             }
@@ -78,8 +101,8 @@ class WebPushNotificationService
                 if ((bool) $parent->comments_disabled) {
                     return;
                 }
-            } elseif (! in_array($status->scope, ['public', 'unlisted', 'private'], true)
-                || ! StatusService::isVisibleTo($status->profile_id, $status->scope, $recipient->id)) {
+            } elseif ($eventType === 'mention' && (! in_array($status->scope, ['public', 'unlisted', 'private'], true)
+                || ! StatusService::isVisibleTo($status->profile_id, $status->scope, $recipient->id))) {
                 // Mentioning someone does not itself grant access to a private
                 // status. Direct messages and groups use separate flows.
                 return;
@@ -124,13 +147,15 @@ class WebPushNotificationService
 
                 return;
             }
-            $payload = $eventType === 'comment'
-                ? self::commentPayload($status, $parent, $actor, $recipient, $username)
-                : self::mentionPayload($status, $actor, $username);
+            $payload = match ($eventType) {
+                'comment' => self::commentPayload($status, $parent, $actor, $recipient, $username),
+                'mention' => self::mentionPayload($status, $actor, $username),
+                'follow' => self::followPayload($actor, $username),
+            };
             $expiresAt = time() + $ttl;
             foreach ($user->pushSubscriptions()->select('id')->lazyById() as $subscription) {
                 $job = (new DeliverWebPush((string) $user->id, (string) $subscription->id, $payload, $expiresAt))->afterCommit();
-                $key = 'webpush:'.$eventType.':'.$user->id.':'.$status->id.':'.$subscription->id;
+                $key = 'webpush:'.$eventType.':'.$user->id.':'.$generationId.':'.$subscription->id;
                 $claim = $store->lock($key, self::DEDUPE_SECONDS);
                 if (! $claim->get()) {
                     continue;
@@ -148,6 +173,25 @@ class WebPushNotificationService
         } catch (Throwable) {
             self::report('orchestration_failed', $eventType ?? 'mention');
         }
+    }
+
+    private static function supports(Notification $notification): bool
+    {
+        return ($notification->action === 'follow'
+            && in_array($notification->item_type, [Profile::class, 'App\\Profile'], true))
+            || (in_array($notification->action, ['comment', 'mention'], true)
+                && in_array($notification->item_type, [Status::class, 'App\\Status'], true));
+    }
+
+    private static function followPayload(Profile $actor, string $username): array
+    {
+        return [
+            'notification_type' => 'follow',
+            'title' => 'New Follower',
+            'body' => '@'.$username.' followed you',
+            'account_id' => (string) $actor->id,
+            'url' => '/i/web/profile/'.$actor->id,
+        ];
     }
 
     private static function classify(Notification $notification, Status $status, Profile $recipient, ?Status $parent): ?string

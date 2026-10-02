@@ -74,6 +74,7 @@ async function push(instance, data) {
 }
 
 const validPaths = [
+    '/i/web/profile/1', '/i/web/profile/123456789',
     '/', targetPath, '/p/Alice_123/999', '/p/alice/123?foo=bar',
     '/p/alice/123#comments', '/settings/notifications',
     '/?source=pwa', '/settings/notifications?foo=bar#browser',
@@ -81,6 +82,11 @@ const validPaths = [
     '/p/a/1?padding=' + 'a'.repeat(2048 - '/p/a/1?padding='.length),
 ];
 const invalidPaths = [
+    '/i/web/profile/', '/i/web/profile/abc', '/i/web/profile/123/',
+    '/i/web/profile/1/evil', '/i/web/profile/-1', '/i/web/profile/1.0',
+    '/i/web/profile/%31', '/i/web/profile/1?next=https://evil.example',
+    '/i/web/profile/1#anything', '/i/web/profile/1/../../evil',
+    '/i/web/other/1', '/i/web/profile/@bob', '/i/web/profile/_/1',
     'https://evil.example/', 'http://evil.example/', '//evil.example/',
     'javascript:alert(1)', 'data:text/html,...', 'blob:https://evil.example/...',
     '\\evil.example', '\\\\evil.example', '/\\evil.example',
@@ -135,6 +141,18 @@ test('push preserves title/body and only sanitized metadata', async () => {
             body: '@bob commented on your post', data: { notification_type: 'comment', url: targetPath },
         },
     }]);
+});
+
+test('follow push-to-click uses only the local numeric profile destination', async () => {
+    const instance = worker();
+    const url = '/i/web/profile/20';
+    await push(instance, { json: () => ({
+        title: 'New Follower', body: '@bob@remote.example followed you',
+        notification_type: 'follow', account_id: '20', url,
+    }) });
+    assert.deepStrictEqual(instance.displays[0].options.data, { notification_type: 'follow', url });
+    await click(instance, instance.displays[0].options.data);
+    assert.deepStrictEqual(instance.opens, [origin + url]);
 });
 
 test('push invalid URL/type become root/unknown without changing empty title/body', async () => {

@@ -19,7 +19,8 @@ function sanitizeNotificationPath(value) {
 		}
 		// Local redirect routes can leave the origin; only reviewed destinations belong here.
 		if (path === "/" || path === "/settings/notifications"
-			|| /^\/p\/[A-Za-z0-9_]+\/[0-9]+$/.test(path)) {
+			|| /^\/p\/[A-Za-z0-9_]+\/[0-9]+$/.test(path)
+			|| (/^\/i\/web\/profile\/[0-9]+$/.test(path) && canonical === path)) {
 			return canonical;
 		}
 	} catch {
