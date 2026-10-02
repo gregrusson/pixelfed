@@ -4,6 +4,7 @@ namespace App\Observers;
 
 use App\Models\Notification;
 use App\Services\NotificationService;
+use App\Services\WebPushNotificationService;
 
 class NotificationObserver
 {
@@ -22,6 +23,7 @@ class NotificationObserver
     public function created(Notification $notification)
     {
         NotificationService::set($notification->profile_id, $notification->id);
+        WebPushNotificationService::notify($notification);
     }
 
     /**
