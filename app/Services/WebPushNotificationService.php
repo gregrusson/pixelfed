@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Jobs\PushNotificationPipeline\DeliverWebPush;
 use App\Models\Follower;
+use App\Models\Like;
 use App\Models\Mention;
 use App\Models\Notification;
 use App\Models\Profile;
@@ -27,7 +28,7 @@ class WebPushNotificationService
 
     public static function notify(Notification $notification): void
     {
-        $eventType = in_array($notification->action, ['mention', 'follow'], true) ? $notification->action : 'comment';
+        $eventType = in_array($notification->action, ['mention', 'follow', 'like'], true) ? $notification->action : 'comment';
         try {
             // Group actions and all other event types are deliberately excluded.
             if (! self::supports($notification)) {
@@ -66,6 +67,25 @@ class WebPushNotificationService
                 }
                 $eventType = 'follow';
                 $generationId = $follower->id;
+            } elseif ($notification->action === 'like') {
+                $eventType = 'like';
+                $status = Status::find($notification->item_id);
+                if (! $status || $status->group_id
+                    || ! in_array($status->scope, ['public', 'unlisted', 'private'], true)
+                    || (string) $status->profile_id !== (string) $recipient->id) {
+                    return;
+                }
+                $like = Like::whereProfileId($actor->id)->whereStatusId($status->id)->first();
+                // Like generations are not stored on Notifications. As with follows,
+                // equal second-precision timestamps cannot disambiguate a stale row.
+                // A delayed old pipeline can also create a newer Notification.
+                if (! $like || (string) $like->profile_id !== (string) $actor->id
+                    || (string) $like->status_id !== (string) $status->id
+                    || ! $notification->created_at || ! $like->created_at
+                    || $notification->created_at->lt($like->created_at)) {
+                    return;
+                }
+                $generationId = $like->id;
             } else {
                 $status = Status::find($notification->item_id);
                 if (! $status || $status->group_id
@@ -93,6 +113,7 @@ class WebPushNotificationService
                 'comment' => (bool) $user->notify_comment,
                 'mention' => (bool) $user->notify_mention,
                 'follow' => (bool) $user->notify_follow,
+                'like' => (bool) $user->notify_like,
             };
             if (! $enabled || ! $user->pushSubscriptions()->exists()) {
                 return;
@@ -151,6 +172,7 @@ class WebPushNotificationService
                 'comment' => self::commentPayload($status, $parent, $actor, $recipient, $username),
                 'mention' => self::mentionPayload($status, $actor, $username),
                 'follow' => self::followPayload($actor, $username),
+                'like' => self::likePayload($status, $actor, $recipient, $username),
             };
             $expiresAt = time() + $ttl;
             foreach ($user->pushSubscriptions()->select('id')->lazyById() as $subscription) {
@@ -179,8 +201,28 @@ class WebPushNotificationService
     {
         return ($notification->action === 'follow'
             && in_array($notification->item_type, [Profile::class, 'App\\Profile'], true))
-            || (in_array($notification->action, ['comment', 'mention'], true)
+            || (in_array($notification->action, ['comment', 'mention', 'like'], true)
                 && in_array($notification->item_type, [Status::class, 'App\\Status'], true));
+    }
+
+    private static function likePayload(Status $status, Profile $actor, Profile $recipient, string $username): array
+    {
+        $payload = [
+            'notification_type' => 'like',
+            'title' => 'New Like',
+            'body' => '@'.$username.' liked your post',
+            'account_id' => (string) $actor->id,
+            'status_id' => (string) $status->id,
+        ];
+        if ($recipient->domain === null && (string) $status->profile_id === (string) $recipient->id
+            && in_array($status->scope, ['public', 'unlisted', 'private'], true) && ! $status->group_id
+            && (bool) $status->local && ! $status->uri && ! $status->object_url && ! $status->url
+            && preg_match('/\A[A-Za-z0-9_]+\z/D', $recipient->username ?? '')
+            && preg_match('/\A[0-9]+\z/D', (string) $status->id)) {
+            $payload['url'] = '/p/'.$recipient->username.'/'.$status->id;
+        }
+
+        return $payload;
     }
 
     private static function followPayload(Profile $actor, string $username): array
