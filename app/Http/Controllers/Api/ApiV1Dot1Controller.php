@@ -45,6 +45,7 @@ use App\Services\StatusService;
 use App\Services\UserAgentService;
 use App\Services\UserRoleService;
 use App\Services\UserStorageService;
+use App\Services\WebPush\LocalPublicationSupport;
 use App\Transformer\Api\AccountTransformer;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -1456,6 +1457,7 @@ class ApiV1Dot1Controller extends Controller
 
         UserStorageService::increaseStorageUsed($user->id, $fileSize);
 
+        LocalPublicationSupport::authorize($status);
         NewStatusPipeline::dispatch($status);
 
         Cache::forget('user:account:id:'.$user->id);

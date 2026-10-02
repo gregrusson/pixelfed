@@ -27,6 +27,7 @@ use App\Services\SnowflakeService;
 use App\Services\UserFilterService;
 use App\Services\UserRoleService;
 use App\Services\UserStorageService;
+use App\Services\WebPush\LocalPublicationSupport;
 use App\Transformer\Api\MediaTransformer;
 use App\Util\Media\Filter;
 use App\Util\Media\License;
@@ -704,6 +705,7 @@ class ComposeController extends Controller
         Cache::forget('status:transformer:media:attachments:'.$status->id);
         Cache::forget('profile:embed:'.$status->profile_id);
         Cache::forget($limitKey);
+        LocalPublicationSupport::authorize($status);
         NewStatusPipeline::dispatch($status);
 
         return $status->url();

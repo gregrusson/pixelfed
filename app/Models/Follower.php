@@ -38,6 +38,11 @@ class Follower extends Model
 {
     protected $guarded = [];
 
+    protected function casts(): array
+    {
+        return ['notify' => 'boolean'];
+    }
+
     const MAX_FOLLOWING = 7500;
 
     const FOLLOW_PER_HOUR = 150;

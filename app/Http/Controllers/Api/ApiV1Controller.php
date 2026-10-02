@@ -75,6 +75,7 @@ use App\Services\StoryIndexService;
 use App\Services\UserFilterService;
 use App\Services\UserRoleService;
 use App\Services\UserStorageService;
+use App\Services\WebPush\LocalPublicationSupport;
 use App\Transformer\Api\Mastodon\v1\MediaTransformer;
 use App\Transformer\Api\Mastodon\v1\StatusTransformer;
 use App\Transformer\Api\RelationshipTransformer;
@@ -1012,6 +1013,15 @@ class ApiV1Controller extends Controller
         abort_if(! $request->user() || ! $request->user()->token(), 403);
         abort_unless($request->user()->tokenCan('follow'), 403);
 
+        $this->validate($request, [
+            'notify' => ['sometimes', 'required', function ($attribute, $value, $fail) {
+                if (! in_array($value, [true, false, 1, 0, '1', '0', 'true', 'false'], true)) {
+                    $fail('The notify field must be a boolean.');
+                }
+            }],
+            'notify_only' => 'sometimes|boolean',
+        ]);
+
         $user = $request->user();
         abort_if($user->profile_id == $id, 400, 'Invalid profile');
 
@@ -1044,8 +1054,15 @@ class ApiV1Controller extends Controller
             ->whereFollowingId($target->id)
             ->exists();
 
-        // Following already, return empty relationship
+        abort_if($request->boolean('notify_only') && ! $isFollowing, 409, 'An accepted follow is required.');
+
+        // Only the authenticated actor's accepted relationship may be updated.
         if ($isFollowing == true) {
+            if ($request->has('notify')) {
+                Follower::whereProfileId($user->profile_id)->whereFollowingId($target->id)
+                    ->update(['notify' => $request->boolean('notify')]);
+                RelationshipService::refresh($user->profile_id, $target->id);
+            }
             $res = RelationshipService::get($user->profile_id, $target->id) ?? [];
 
             return $this->json($res);
@@ -1078,6 +1095,10 @@ class ApiV1Controller extends Controller
                 'profile_id' => $user->profile_id,
                 'following_id' => $target->id,
             ]);
+            if ($follower->wasRecentlyCreated && $request->has('notify')) {
+                $follower->notify = $request->boolean('notify');
+                $follower->save();
+            }
             FollowPipeline::dispatch($follower)->onQueue('high');
         }
 
@@ -1199,6 +1220,7 @@ class ApiV1Controller extends Controller
                     return [
                         'id' => $id,
                         'following' => false,
+                        'notifying' => false,
                         'followed_by' => false,
                         'blocking' => false,
                         'muting' => false,
@@ -3991,6 +4013,7 @@ class ApiV1Controller extends Controller
         Cache::forget('profile:embed:'.$status->profile_id);
         Cache::forget($limitKey);
 
+        LocalPublicationSupport::authorize($status);
         NewStatusPipeline::dispatch($status);
         if ($status->in_reply_to_id) {
             CommentPipeline::dispatch($parent, $status);

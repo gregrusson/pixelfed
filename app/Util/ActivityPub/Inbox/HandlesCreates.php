@@ -10,6 +10,7 @@ use App\Models\Profile;
 use App\Models\Status;
 use App\Services\FollowerService;
 use App\Services\PollService;
+use App\Services\WebPushFollowedPostService;
 use App\Util\ActivityPub\Helpers;
 
 trait HandlesCreates
@@ -245,7 +246,10 @@ trait HandlesCreates
             return;
         }
 
-        Helpers::storeStatus($url, $actor, $activity);
+        $status = Helpers::storeStatus($url, $actor, $activity);
+        if ($status) {
+            WebPushFollowedPostService::remoteCreated($status);
+        }
     }
 
     public function handlePollVote(): void

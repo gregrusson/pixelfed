@@ -26,6 +26,7 @@ class SpaController extends Controller
     public function webPost(Request $request, $id): RedirectResponse|View
     {
         abort_unless(config('exp.spa'), 404);
+        abort_unless(is_string($id) && preg_match('/\A[0-9]+\z/D', $id), 404);
         if ($request->user()) {
             return view('layouts.spa');
         }
@@ -38,11 +39,13 @@ class SpaController extends Controller
 
         if (
             $post &&
-            isset($post['url']) &&
+            isset($post['account']['username']) &&
+            is_string($post['account']['username']) &&
+            preg_match('/\A[A-Za-z0-9_][A-Za-z0-9_.-]*\z/D', $post['account']['username']) &&
             isset($post['local']) &&
             $post['local'] === true
         ) {
-            return redirect($post['url']);
+            return redirect('/p/'.$post['account']['username'].'/'.$id);
         }
 
         return redirect('/login');

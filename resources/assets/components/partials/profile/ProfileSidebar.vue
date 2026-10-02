@@ -93,6 +93,10 @@
                     <div v-if="profile.id !== user.id">
                         <b-dropdown-divider></b-dropdown-divider>
 
+                        <b-dropdown-item v-if="relationship.following" link-class="font-weight-bold" @click="togglePostNotifications()">
+                            {{ relationship.notifying ? 'Stop new post notifications' : 'Notify me about new posts' }}
+                        </b-dropdown-item>
+
                         <b-dropdown-item link-class="font-weight-bold" @click="handleMute()">
                             {{ relationship.muting ? 'Unmute' : 'Mute' }}
                         </b-dropdown-item>
@@ -272,6 +276,10 @@
 
                         <div v-if="profile.id !== user.id">
                             <b-dropdown-divider></b-dropdown-divider>
+
+                            <b-dropdown-item v-if="relationship.following" link-class="font-weight-bold" @click="togglePostNotifications()">
+                                {{ relationship.notifying ? 'Stop new post notifications' : 'Notify me about new posts' }}
+                            </b-dropdown-item>
 
                             <b-dropdown-item link-class="font-weight-bold" @click="handleMute()">
                                 {{ relationship.muting ? 'Unmute' : 'Mute' }}
@@ -460,6 +468,20 @@ export default {
             let month = new Intl.DateTimeFormat("en-US", {month: "long"}).format(d);
             let year = d.getFullYear();
             return `${month} ${year}`;
+        },
+
+        togglePostNotifications() {
+            if (this.profile.id === this.user.id || !this.relationship.following) return;
+            return axios.post('/api/v1/accounts/' + this.profile.id + '/follow', {
+                notify: !this.relationship.notifying,
+                notify_only: true,
+            }).then(res => {
+                this.$emit('updateRelationship', res.data);
+            }).catch(() => {
+                this.$bvToast.toast('Could not update new post notifications. Refresh and try again.', {
+                    title: 'Notifications', variant: 'danger', autoHideDelay: 4000,
+                });
+            });
         },
 
         follow() {

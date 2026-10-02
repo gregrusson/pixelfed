@@ -74,6 +74,7 @@ async function push(instance, data) {
 }
 
 const validPaths = [
+    '/i/web/post/123',
     '/account/follow-requests',
     '/i/web/profile/1', '/i/web/profile/123456789',
     '/', targetPath, '/p/Alice_123/999', '/p/alice/123?foo=bar',
@@ -83,6 +84,11 @@ const validPaths = [
     '/p/a/1?padding=' + 'a'.repeat(2048 - '/p/a/1?padding='.length),
 ];
 const invalidPaths = [
+    '/i/web/post/', '/i/web/post/abc', '/i/web/post/123/',
+    '/i/web/post/123?foo=bar', '/i/web/post/123#fragment', '/i/web/post/123/anything',
+    '/i/web/post/../123', '/i/web/post/%31%32%33',
+    '//evil.example/i/web/post/123', 'https://evil.example/i/web/post/123',
+    '/i\\web\\post\\123',
     '/account/follow-requests/', '/account/follow-requests?foo=bar',
     '/account/follow-requests#requests', '/account/follow-requests/1',
     '/account/follow-requests/../settings', '/account/%66ollow-requests',
