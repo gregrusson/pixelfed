@@ -25,9 +25,12 @@ class RelationshipService
         }
 
         return Cache::remember(self::key("a_{$aid}:t_{$tid}"), 1209600, function () use ($aid, $tid) {
+            $follow = Follower::whereProfileId($aid)->whereFollowingId($tid)->first();
+
             return [
                 'id' => (string) $tid,
-                'following' => Follower::whereProfileId($aid)->whereFollowingId($tid)->exists(),
+                'following' => $follow !== null,
+                'notifying' => (bool) ($follow?->notify ?? false),
                 'followed_by' => Follower::whereProfileId($tid)->whereFollowingId($aid)->exists(),
                 'blocking' => UserFilter::whereUserId($aid)
                     ->whereFilterableType(Profile::class)
@@ -85,6 +88,7 @@ class RelationshipService
         return [
             'id' => (string) $tid,
             'following' => false,
+            'notifying' => false,
             'followed_by' => false,
             'blocking' => false,
             'muting' => false,
@@ -98,7 +102,7 @@ class RelationshipService
 
     protected static function key($suffix): string
     {
-        return self::CACHE_KEY.$suffix;
+        return self::CACHE_KEY.'v2:'.$suffix;
     }
 
     public static function getWithDate($aid, $tid)

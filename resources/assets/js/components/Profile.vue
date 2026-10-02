@@ -462,6 +462,9 @@
             <div v-if="user && !owner && relationship.following" class="list-group-item cursor-pointer text-center rounded" @click="followProfile">
                 Unfollow
             </div>
+            <div v-if="user && !owner && relationship.following" class="list-group-item cursor-pointer text-center rounded" @click="togglePostNotifications">
+                {{ relationship.notifying ? 'Stop new post notifications' : 'Notify me about new posts' }}
+            </div>
             <div v-if="user && !owner && !relationship.muting" class="list-group-item cursor-pointer text-center rounded" @click="muteProfile">
                 Mute
             </div>
@@ -730,6 +733,13 @@
         },
 
         methods: {
+            togglePostNotifications() {
+                if (!this.user || this.owner || !this.relationship.following) return;
+                return axios.post('/api/v1/accounts/' + this.profile.id + '/follow', {
+                    notify: !this.relationship.notifying, notify_only: true,
+                }).then(res => { this.relationship = res.data; })
+                    .catch(() => swal('Could not update notifications', 'Refresh and try again.', 'error'));
+            },
             fetchProfile() {
                 axios.get('/api/pixelfed/v1/accounts/' + this.profileId).then(res => {
                     this.profile = res.data;

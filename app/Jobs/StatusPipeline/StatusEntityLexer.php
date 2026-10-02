@@ -13,6 +13,7 @@ use App\Services\AdminShadowFilterService;
 use App\Services\PublicTimelineService;
 use App\Services\StatusService;
 use App\Services\UserFilterService;
+use App\Services\WebPush\LocalPublicationSupport;
 use App\Util\Lexer\Autolink;
 use App\Util\Lexer\Extractor;
 use App\Util\Sentiment\Bouncer;
@@ -93,6 +94,7 @@ class StatusEntityLexer implements ShouldQueue
         }
 
         $this->fanout();
+        LocalPublicationSupport::completed($status);
     }
 
     public function parseEntities()

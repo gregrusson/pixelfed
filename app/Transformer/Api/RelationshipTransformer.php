@@ -2,6 +2,7 @@
 
 namespace App\Transformer\Api;
 
+use App\Models\Follower;
 use App\Models\FollowRequest;
 use App\Models\Profile;
 use App\Models\UserDomainBlock;
@@ -34,6 +35,7 @@ class RelationshipTransformer extends Fractal\TransformerAbstract
         return [
             'id' => (string) $profile->id,
             'following' => $auth ? $user->follows($profile) : false,
+            'notifying' => $auth && Follower::whereProfileId($user->id)->whereFollowingId($profile->id)->whereNotify(true)->exists(),
             'followed_by' => $auth ? $user->followedBy($profile) : false,
             'blocking' => $auth ? $user->blockedIds()->contains($profile->id) : false,
             'muting' => $auth ? $user->mutedIds()->contains($profile->id) : false,

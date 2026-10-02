@@ -7,6 +7,7 @@ use App\Jobs\MediaPipeline\MediaDeletePipeline;
 use App\Jobs\StatusPipeline\NewStatusPipeline;
 use App\Models\Media;
 use App\Models\Status;
+use App\Services\WebPush\LocalPublicationSupport;
 use App\Util\ActivityPub\Helpers;
 use Illuminate\Http\File;
 use Illuminate\Support\Facades\Cache;
@@ -78,6 +79,12 @@ class MediaStorageService
             Cache::forget('status:transformer:media:attachments:'.$statusId);
             MediaService::del($statusId);
             StatusService::del($statusId, false);
+        }
+
+        // Storage callbacks can resume, but never authorize, a browser event.
+        $publicationStatus = Status::find($statusId);
+        if ($publicationStatus) {
+            LocalPublicationSupport::resume((string) $statusId, (string) $publicationStatus->profile_id);
         }
 
         if (config_cache('pixelfed.cloud_storage') && ! config('pixelfed.media_fast_process')) {

@@ -5,6 +5,7 @@ namespace App\Jobs\PushNotificationPipeline;
 use App\Models\User;
 use App\Services\WebPush\DeliveryException;
 use App\Services\WebPush\DeliveryService;
+use App\Services\WebPushFollowedPostService;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Queue\Jobs\RedisJob;
@@ -27,6 +28,7 @@ class DeliverWebPush implements ShouldQueue
         public readonly string $subscriptionId,
         public readonly array $payload,
         public readonly int $expiresAt,
+        public readonly ?array $newPostEvent = null,
     ) {
         $this->onConnection(config('webpush.delivery.connection', 'redis'));
         $this->onQueue(config('webpush.delivery.queue', 'pushnotify'));
@@ -49,6 +51,15 @@ class DeliverWebPush implements ShouldQueue
                 return;
             }
             $snapshot = $subscription->getAttributes();
+            if (($this->payload['notification_type'] ?? null) === 'new_post') {
+                if (! $this->newPostEvent
+                    || ($this->newPostEvent['status_id'] ?? null) !== ($this->payload['status_id'] ?? null)
+                    || ($this->newPostEvent['author_id'] ?? null) !== ($this->payload['account_id'] ?? null)
+                    || ! WebPushFollowedPostService::eligibleRecipient($this->newPostEvent, $this->userId)
+                    || $this->expiresAt <= time() || (int) $this->newPostEvent['deadline'] <= time()) {
+                    return;
+                }
+            }
             $outcome = $delivery->send($subscription, $this->payload, min(300, $this->expiresAt - time()));
             // Timestamps have second precision. Within this second an identical re-registration
             // is indistinguishable from our snapshot, so conservatively defer expiry cleanup.
