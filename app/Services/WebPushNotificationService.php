@@ -12,6 +12,7 @@ use App\Services\WebPush\DeliveryQueueConfiguration;
 use App\Services\WebPush\DeliveryService;
 use Illuminate\Cache\RedisStore;
 use Illuminate\Contracts\Bus\Dispatcher;
+use Illuminate\Contracts\Queue\Factory as QueueFactory;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Throwable;
@@ -73,12 +74,30 @@ class WebPushNotificationService
             // Only plain account identifiers enter the body (never display names,
             // markup or remote URLs). Remote usernames may include their domain.
             $username = $actor->username;
+            $remote = $actor->domain !== null;
+            if ($remote && is_string($username) && str_starts_with($username, '@')) {
+                // Imported profiles store @name@domain. Remove exactly one marker;
+                // a second leading @ must still fail validation below.
+                $username = substr($username, 1);
+            }
+            // Helpers::extractUsername permits remote names beginning with . or -.
+            // Keep the local rule unchanged and require an alphanumeric remote name
+            // after removing its permitted punctuation, as the importer does.
+            $pattern = $remote
+                ? '/\A[A-Za-z0-9_.-][A-Za-z0-9_.@-]*\z/D'
+                : '/\A[A-Za-z0-9_][A-Za-z0-9_.@-]*\z/D';
             if (! is_string($username) || strlen($username) > 255
-                || ! preg_match('/\A[A-Za-z0-9_][A-Za-z0-9_.@-]*\z/D', $username)) {
+                || ! preg_match($pattern, $username)
+                || ($remote && ! ctype_alnum(str_replace(['_', '.', '-'], '', explode('@', $username)[0])))) {
                 return;
             }
             app(DeliveryService::class)->validateConfiguration(); // Local checks only.
-            [, , $ttl] = DeliveryQueueConfiguration::validated();
+            [$connection, , $ttl] = DeliveryQueueConfiguration::validated();
+            // Laravel's dispatcher resolves this same cached queue connection.
+            // Resolve local container/connector preparation before claiming events;
+            // serialization, queue events and Redis acceptance remain in dispatch.
+            $dispatcher = app(Dispatcher::class);
+            app(QueueFactory::class)->connection($connection);
             $store = Cache::store('redis')->getStore();
             if (! $store instanceof RedisStore) {
                 self::report('redis_dedupe_required');
@@ -105,20 +124,13 @@ class WebPushNotificationService
                 if (! $claim->get()) {
                     continue;
                 }
-                $handedToDispatcher = false;
                 try {
-                    $dispatcher = app(Dispatcher::class);
-                    $handedToDispatcher = true;
                     $dispatcher->dispatch($job);
                     // Keep the claim until expiry. Claim-then-dispatch has a small
                     // crash window; strict exactly-once requires a durable outbox.
                 } catch (Throwable) {
-                    // Only release our own claim if enqueueing could not have begun.
-                    // A queue exception may follow acceptance by Redis; releasing
-                    // in that ambiguous case could cause duplicate deliveries.
-                    if (! $handedToDispatcher) {
-                        $claim->release();
-                    }
+                    // Dispatch can fail before or after acceptance by Redis.
+                    // Keep the claim when that outcome cannot be distinguished.
                     self::report('enqueue_failed');
                 }
             }

@@ -7,9 +7,11 @@ use App\Models\User;
 use App\Services\WebPush\BoundedDnsResolver;
 use App\Services\WebPush\DeliveryService;
 use App\Services\WebPushNotificationService;
+use App\Util\ActivityPub\Helpers;
 use Illuminate\Cache\ArrayStore;
 use Illuminate\Cache\Repository;
 use Illuminate\Contracts\Bus\Dispatcher;
+use Illuminate\Contracts\Queue\Factory as QueueFactory;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -43,12 +45,44 @@ it('queues the exact safe local comment payload using browser opt-in with the mo
 });
 
 it('accepts a federated actor and reply without exposing their URI', function () {
-    DB::table('profiles')->where('id', 20)->update(['user_id' => null, 'domain' => 'remote.example', 'username' => 'bob@remote.example']);
+    DB::table('profiles')->where('id', 20)->update(['user_id' => null, 'domain' => 'remote.example', 'username' => '@bob@remote.example']);
     DB::table('statuses')->where('id', 200)->update(['uri' => 'https://remote.example/private-uri']);
     createCommentPushNotification();
     Queue::assertPushed(DeliverWebPush::class, fn ($job) => $job->payload['body'] === '@bob@remote.example commented on your post'
         && ! str_contains(serialize($job), 'private-uri'));
+    Queue::assertPushed(DeliverWebPush::class, 1);
 });
+
+it('supports importer-valid remote punctuation and normalized length without duplicate pushes', function (string $username) {
+    expect(Helpers::extractUsername(['preferredUsername' => explode('@', substr($username, 1))[0]]))->not->toBeNull();
+    DB::table('profiles')->where('id', 20)->update(['domain' => 'remote.example', 'username' => $username]);
+    $notification = createCommentPushNotification();
+    WebPushNotificationService::notify($notification);
+    createCommentPushNotification(['action' => 'mention']);
+    Queue::assertPushed(DeliverWebPush::class, fn ($job) => $job->payload['body'] === $username.' commented on your post');
+    Queue::assertPushed(DeliverWebPush::class, 1);
+})->with(['@.bob@remote.example', '@-bob@remote.example', '@'.str_repeat('b', 240).'@remote.example']);
+
+it('rejects malformed remote usernames after removing at most one marker', function (string $username) {
+    DB::table('profiles')->where('id', 20)->update(['domain' => 'remote.example', 'username' => $username]);
+    createCommentPushNotification();
+    Queue::assertNothingPushed();
+    expect($this->claims)->toBeEmpty();
+})->with(['@@bob@remote.example', '@@@bob@remote.example', '@', '@.@remote.example', '@-@remote.example',
+    '@bob smith@remote.example', "@bob\n@remote.example", "@bob\0@remote.example", '@bob/evil@remote.example',
+    '@bob\\evil@remote.example', '@<b>bob</b>@remote.example', '@bob:443@remote.example', '@bob?x@remote.example',
+    '@bob#x@remote.example', '@bob%2f@remote.example', '@'.str_repeat('b', 241).'@remote.example']);
+
+it('keeps local leading character validation unchanged', function (string $username, bool $allowed) {
+    DB::table('profiles')->where('id', 20)->update(['username' => $username]);
+    createCommentPushNotification();
+    if ($allowed) {
+        Queue::assertPushed(DeliverWebPush::class, fn ($job) => $job->payload['body'] === '@'.$username.' commented on your post');
+        Queue::assertPushed(DeliverWebPush::class, 1);
+    } else {
+        Queue::assertNothingPushed();
+    }
+})->with([['bob', true], ['_bob', true], ['@bob', false], ['.bob', false], ['-bob', false]]);
 
 it('rejects self comments independently of pipeline checks', function () {
     DB::table('statuses')->where('id', 200)->update(['profile_id' => 10]);
@@ -184,8 +218,18 @@ it('rejects invalid queue settings before claiming an event', function (string $
     ['webpush.delivery.ttl', 0], ['webpush.delivery.ttl', 301], ['webpush.delivery.ttl', '300'],
 ]);
 
-it('releases its own claim if dispatcher resolution fails before enqueue can begin', function () {
+it('creates no claim if dispatcher preparation fails', function () {
+    $this->redisWire->shouldNotReceive('set');
     $this->app->bind(Dispatcher::class, fn () => throw new RuntimeException('secret'));
+    createCommentPushNotification();
+    expect($this->claims)->toBeEmpty()->and(Notification::count())->toBe(1);
+});
+
+it('creates no claim if queue connection preparation fails', function () {
+    $this->redisWire->shouldNotReceive('set');
+    $factory = Mockery::mock(QueueFactory::class);
+    $factory->shouldReceive('connection')->once()->with('redis')->andThrow(new RuntimeException('secret'));
+    $this->app->instance(QueueFactory::class, $factory);
     createCommentPushNotification();
     expect($this->claims)->toBeEmpty()->and(Notification::count())->toBe(1);
 });
